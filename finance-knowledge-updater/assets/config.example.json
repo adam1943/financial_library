@@ -1,0 +1,263 @@
+{
+  "schema_version": 1,
+  "knowledge_base_dir": "knowledge_base",
+  "timezone": "Asia/Shanghai",
+  "lookback_days": 7,
+  "top_n": 20,
+  "request_timeout_seconds": 8,
+  "request_attempts": 2,
+  "news_sources": [
+    {
+      "name": "AKShare-东方财富财经新闻",
+      "type": "akshare_stock_news_em",
+      "url": "akshare://stock_news_em",
+      "enabled": true,
+      "max_items": 50
+    },
+    {
+      "name": "36Kr-科技财经快讯",
+      "type": "rss",
+      "url": "https://36kr.com/feed",
+      "enabled": true
+    },
+    {
+      "name": "新浪财经-滚动财经",
+      "type": "json_sina_roll",
+      "url": "https://feed.mix.sina.com.cn/api/roll/get?pageid=153&lid=2509&num=30&page=1",
+      "enabled": true
+    },
+    {
+      "name": "新浪财经-A股市场",
+      "type": "json_sina_roll",
+      "url": "https://feed.mix.sina.com.cn/api/roll/get?pageid=153&lid=2515&num=30&page=1",
+      "enabled": true
+    },
+    {
+      "name": "东方财富-7x24快讯",
+      "type": "json_eastmoney_fastnews",
+      "url": "https://eminfo.eastmoney.com/pc_news/FastNews/GetInfoList?code=100&pageNumber=1&pageSize=30",
+      "enabled": true
+    }
+  ],
+  "watchlist": [
+    {
+      "symbol": "sh000001",
+      "name": "上证指数",
+      "asset_type": "index",
+      "market": "CN",
+      "provider": "eastmoney_stock"
+    },
+    {
+      "symbol": "sz399001",
+      "name": "深证成指",
+      "asset_type": "index",
+      "market": "CN",
+      "provider": "eastmoney_stock"
+    },
+    {
+      "symbol": "sz399006",
+      "name": "创业板指",
+      "asset_type": "index",
+      "market": "CN",
+      "provider": "eastmoney_stock"
+    },
+    {
+      "symbol": "sh510300",
+      "name": "沪深300ETF",
+      "asset_type": "fund",
+      "market": "CN",
+      "provider": "eastmoney_stock"
+    },
+    {
+      "symbol": "sh510500",
+      "name": "中证500ETF",
+      "asset_type": "fund",
+      "market": "CN",
+      "provider": "eastmoney_stock"
+    },
+    {
+      "symbol": "sh588000",
+      "name": "科创50ETF",
+      "asset_type": "fund",
+      "market": "CN",
+      "provider": "eastmoney_stock"
+    },
+    {
+      "symbol": "sh512760",
+      "name": "芯片ETF",
+      "asset_type": "fund",
+      "market": "CN",
+      "provider": "eastmoney_stock"
+    },
+    {
+      "symbol": "sz159915",
+      "name": "创业板ETF",
+      "asset_type": "fund",
+      "market": "CN",
+      "provider": "eastmoney_stock"
+    },
+    {
+      "symbol": "sh600519",
+      "name": "贵州茅台",
+      "asset_type": "stock",
+      "market": "CN",
+      "provider": "eastmoney_stock"
+    },
+    {
+      "symbol": "sz300750",
+      "name": "宁德时代",
+      "asset_type": "stock",
+      "market": "CN",
+      "provider": "eastmoney_stock"
+    },
+    {
+      "symbol": "sz002594",
+      "name": "比亚迪",
+      "asset_type": "stock",
+      "market": "CN",
+      "provider": "eastmoney_stock"
+    },
+    {
+      "symbol": "sh601138",
+      "name": "工业富联",
+      "asset_type": "stock",
+      "market": "CN",
+      "provider": "eastmoney_stock"
+    },
+    {
+      "symbol": "sz300308",
+      "name": "中际旭创",
+      "asset_type": "stock",
+      "market": "CN",
+      "provider": "eastmoney_stock"
+    },
+    {
+      "symbol": "sh688981",
+      "name": "中芯国际",
+      "asset_type": "stock",
+      "market": "CN",
+      "provider": "eastmoney_stock"
+    },
+    {
+      "symbol": "sh603259",
+      "name": "药明康德",
+      "asset_type": "stock",
+      "market": "CN",
+      "provider": "eastmoney_stock"
+    },
+    {
+      "symbol": "sz000651",
+      "name": "格力电器",
+      "asset_type": "stock",
+      "market": "CN",
+      "provider": "eastmoney_stock"
+    }
+  ],
+  "method_input_csv": "input/trading_methods.csv",
+  "keyword_sets": {
+    "positive": [
+      "政策支持",
+      "业绩预增",
+      "盈利改善",
+      "订单增长",
+      "资金流入",
+      "突破",
+      "创新高",
+      "景气度",
+      "分红",
+      "回购",
+      "估值修复"
+    ],
+    "risk": [
+      "退市",
+      "亏损",
+      "业绩下滑",
+      "减持",
+      "立案",
+      "调查",
+      "处罚",
+      "违约",
+      "暴雷",
+      "诉讼",
+      "监管",
+      "地缘",
+      "制裁",
+      "流动性风险"
+    ],
+    "themes": {
+      "AI算力": [
+        "人工智能",
+        "AI",
+        "算力",
+        "大模型",
+        "数据中心",
+        "服务器"
+      ],
+      "半导体": [
+        "半导体",
+        "芯片",
+        "先进封装",
+        "存储",
+        "晶圆",
+        "光刻"
+      ],
+      "新能源": [
+        "新能源",
+        "光伏",
+        "储能",
+        "锂电",
+        "风电",
+        "氢能"
+      ],
+      "创新药": [
+        "创新药",
+        "医药",
+        "CXO",
+        "临床",
+        "生物科技"
+      ],
+      "消费复苏": [
+        "消费",
+        "白酒",
+        "旅游",
+        "免税",
+        "餐饮",
+        "复苏"
+      ],
+      "低空经济": [
+        "低空经济",
+        "无人机",
+        "eVTOL",
+        "通航"
+      ],
+      "红利低波": [
+        "红利",
+        "高股息",
+        "低波",
+        "央企",
+        "分红"
+      ],
+      "并购重组": [
+        "并购",
+        "重组",
+        "资产注入",
+        "国企改革"
+      ],
+      "出海": [
+        "出海",
+        "海外订单",
+        "出口",
+        "全球化"
+      ]
+    }
+  },
+  "akshare_python": ".venv/bin/python",
+  "fund_analyst": {
+    "enabled": true,
+    "strong_top": 8,
+    "strong_max_candidates": 24,
+    "macro_state": "normal",
+    "portfolio_risk_limit": 8,
+    "external_dir": "external/fund-analyst"
+  }
+}

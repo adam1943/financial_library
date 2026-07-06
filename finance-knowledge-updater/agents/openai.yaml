@@ -1,0 +1,7 @@
+interface:
+  display_name: "金融知识库更新器"
+  short_description: "持续抓取舆情行情并维护投研知识库"
+  default_prompt: "Use $finance-knowledge-updater to update my stock and fund research knowledge base."
+
+policy:
+  allow_implicit_invocation: true

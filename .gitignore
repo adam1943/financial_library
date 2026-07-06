@@ -1,0 +1,32 @@
+# Local/runtime files
+.DS_Store
+.venv/
+__pycache__/
+*.py[cod]
+task_plan.md
+findings.md
+progress.md
+
+# Secrets
+knowledge_base/input/tushare_token.txt
+
+# Personal portfolio and strategy inputs
+knowledge_base/input/portfolio_holdings.csv
+knowledge_base/input/portfolio_trades.csv
+knowledge_base/input/trading_methods.csv
+
+# Generated knowledge-base artifacts
+knowledge_base/data/
+knowledge_base/raw/
+knowledge_base/reports/
+knowledge_base/fund_analyst/
+knowledge_base/latest.md
+knowledge_base/latest_attempt.md
+knowledge_base/candidates.csv
+knowledge_base/source_status.json
+
+# Integrated fund analyst runtime artifacts
+external/fund-analyst/cache/
+external/fund-analyst/output/
+external/fund-analyst/__pycache__/
+external/fund-analyst/2026-*.txt

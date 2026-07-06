@@ -1,0 +1,12 @@
+# 基金智能筛选与行业轮动分析师 v4.0 - Python 依赖清单
+# 安装命令: pip install -r requirements.txt
+
+akshare>=1.12.0          # 核心数据源：A股/港股/美股/基金/宏观
+pandas>=2.0.0            # 数据处理
+numpy>=1.24.0            # 数值计算
+requests>=2.31.0         # HTTP请求（补充数据源）
+chinese-calendar>=1.9.0  # 中国节假日判断
+yfinance>=0.2.30         # 美股数据备用源
+python-dateutil>=2.8.2   # 日期处理
+tabulate>=0.9.0          # 表格化输出
+colorama>=0.4.6          # 彩色终端输出
