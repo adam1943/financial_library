@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>金融交易知识库</title>
-    <link rel="stylesheet" href="/styles.css?asset=20260701-overview-layout" />
+    <link rel="stylesheet" href="/styles.css?asset=20260706-after-close-4" />
   </head>
   <body>
     <div class="app-shell">
@@ -22,6 +22,9 @@
           </button>
           <button class="nav-item" data-view="candidates">
             <span>候选池</span>
+          </button>
+          <button class="nav-item" data-view="afterClose">
+            <span>盘后分析</span>
           </button>
           <button class="nav-item" data-view="sentiment">
             <span>舆情</span>
@@ -210,6 +213,118 @@
                 <tbody id="candidateRows"></tbody>
               </table>
             </div>
+          </div>
+        </section>
+
+        <section class="view" id="afterClose">
+          <div id="afterCloseNotice" class="notice" hidden></div>
+          <div class="metric-grid">
+            <div class="metric">
+              <span>资金命中</span>
+              <strong id="acFlowFound">-</strong>
+            </div>
+            <div class="metric">
+              <span>资金确认</span>
+              <strong id="acConfirmed">-</strong>
+            </div>
+            <div class="metric">
+              <span>持仓命中</span>
+              <strong id="acPortfolioFlowFound">-</strong>
+            </div>
+            <div class="metric warning">
+              <span>背离/复核</span>
+              <strong id="acDiverged">-</strong>
+            </div>
+            <div class="metric">
+              <span>更新时间</span>
+              <strong id="acUpdated">-</strong>
+            </div>
+          </div>
+          <div class="content-grid after-close-grid">
+            <section class="panel wide">
+              <div class="panel-head">
+                <h3>盘后结论</h3>
+                <button class="text-button primary-action" id="runAfterClose">刷新盘后分析</button>
+              </div>
+              <div id="afterCloseConclusions" class="suggestion-list"></div>
+              <p id="afterCloseMethod" class="form-hint"></p>
+            </section>
+            <section class="panel">
+              <div class="panel-head">
+                <h3>来源状态</h3>
+              </div>
+              <div id="afterCloseSources" class="source-status-list"></div>
+            </section>
+            <section class="panel full">
+              <div class="panel-head">
+                <h3>个人持仓盘后复核</h3>
+                <span class="muted">按你的持仓单独计算，不受候选池排序影响</span>
+              </div>
+              <div class="table-wrap">
+                <table class="after-close-table portfolio-after-close-table">
+                  <thead>
+                    <tr>
+                      <th>持仓</th>
+                      <th>市值</th>
+                      <th>浮盈亏</th>
+                      <th>仓位</th>
+                      <th>涨跌幅</th>
+                      <th>主力净流入</th>
+                      <th>资金源</th>
+                      <th>信号</th>
+                      <th>复核说明</th>
+                    </tr>
+                  </thead>
+                  <tbody id="afterClosePortfolioRows"></tbody>
+                </table>
+              </div>
+            </section>
+            <section class="panel full">
+              <div class="panel-head">
+                <h3>候选池资金确认</h3>
+                <span class="muted">仅作盘后复核，不改候选池总分</span>
+              </div>
+              <div class="table-wrap">
+                <table class="after-close-table">
+                  <thead>
+                    <tr>
+                      <th>标的</th>
+                      <th>来源</th>
+                      <th>候选分</th>
+                      <th>热度</th>
+                      <th>涨跌幅</th>
+                      <th>主力净流入</th>
+                      <th>净占比</th>
+                      <th>资金源</th>
+                      <th>信号</th>
+                      <th>说明</th>
+                    </tr>
+                  </thead>
+                  <tbody id="afterCloseWatchRows"></tbody>
+                </table>
+              </div>
+            </section>
+            <section class="panel wide">
+              <div class="panel-head">
+                <h3>板块资金流</h3>
+              </div>
+              <div class="flow-columns">
+                <div>
+                  <h4>净流入</h4>
+                  <div id="sectorInflowList" class="flow-list"></div>
+                </div>
+                <div>
+                  <h4>净流出</h4>
+                  <div id="sectorOutflowList" class="flow-list"></div>
+                </div>
+              </div>
+            </section>
+            <section class="panel">
+              <div class="panel-head">
+                <h3>个股资金榜</h3>
+              </div>
+              <div id="stockFlowRank" class="flow-list compact-flow"></div>
+            </section>
           </div>
         </section>
 
@@ -647,6 +762,6 @@
         <div id="newsDialogBody"></div>
       </article>
     </dialog>
-    <script src="/app.js?asset=20260701-overview-layout"></script>
+    <script src="/app.js?asset=20260706-after-close-4"></script>
   </body>
 </html>

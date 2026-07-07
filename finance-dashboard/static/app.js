@@ -4,6 +4,7 @@ const state = {
   reports: null,
   portfolio: null,
   fundAnalyst: null,
+  afterClose: null,
   config: null,
   configPath: null,
   sourceTemplates: [],
@@ -56,20 +57,23 @@ function applyConfigPayload(payload) {
 }
 
 async function loadAll() {
-  const [summary, candidates, config, portfolio, fundAnalyst] = await Promise.all([
+  const [summary, candidates, config, portfolio, fundAnalyst, afterClose] = await Promise.all([
     fetchJson("/api/summary"),
     fetchJson("/api/candidates"),
     fetchJson("/api/config"),
     fetchJson("/api/portfolio"),
     fetchJson("/api/fund-analyst"),
+    fetchJson("/api/after-close"),
   ]);
   state.summary = summary;
   state.candidates = candidates.candidates || [];
   state.portfolio = portfolio;
   state.fundAnalyst = fundAnalyst;
+  state.afterClose = afterClose;
   applyConfigPayload(config);
   render();
   maybeAutoUpdate();
+  maybeAutoAfterClose();
 }
 
 function render() {
@@ -80,6 +84,7 @@ function render() {
   renderConfig();
   renderPortfolio();
   renderFundAnalyst();
+  renderAfterClose();
 }
 
 function renderMeta() {
@@ -829,6 +834,154 @@ function renderFundAnalyst() {
   `;
 }
 
+function fmtFlowMoney(value) {
+  if (value === null || value === undefined || value === "") return "-";
+  const number = Number(value);
+  if (!Number.isFinite(number)) return String(value);
+  const abs = Math.abs(number);
+  if (abs >= 100000000) return `${(number / 100000000).toFixed(2)} 亿`;
+  if (abs >= 10000) return `${(number / 10000).toFixed(2)} 万`;
+  return number.toFixed(2);
+}
+
+function sourceStatusClass(item) {
+  if (item.skipped) return "skipped";
+  if (!item.ok) return "fail";
+  if (item.degraded) return "warn";
+  return "ok";
+}
+
+function sourceStatusLabel(item) {
+  if (item.skipped) return "跳过";
+  if (!item.ok) return "FAIL";
+  if (item.degraded) return "备用";
+  return "OK";
+}
+
+function flowClass(value) {
+  const number = Number(value || 0);
+  if (number > 0) return "positive";
+  if (number < 0) return "negative";
+  return "";
+}
+
+function signalClass(value) {
+  return {
+    资金确认: "good",
+    资金试探: "watch",
+    舆情资金背离: "warn",
+    弱势流出: "risk",
+    风险复核: "risk",
+    缺资金数据: "neutral",
+    中性观察: "neutral",
+  }[value] || "neutral";
+}
+
+function renderFlowList(selector, items, limit = 8) {
+  $(selector).innerHTML = (items || []).slice(0, limit).map((item) => `
+    <div class="flow-item">
+      <div>
+        <strong>${escapeHtml(item.name || item.code || "-")}</strong>
+        <span>${escapeHtml(item.category || item.source || "")}${item.change_pct === null || item.change_pct === undefined ? "" : ` · 涨跌 ${fmt(item.change_pct)}%`}</span>
+      </div>
+      <b class="${flowClass(item.main_net_inflow)}">${fmtFlowMoney(item.main_net_inflow)}</b>
+    </div>
+  `).join("") || `<div class="empty">暂无资金流数据</div>`;
+}
+
+function renderAfterClose() {
+  const data = state.afterClose || {};
+  const metrics = data.metrics || {};
+  const running = data.state?.running;
+  $("#acFlowFound").textContent = `${metrics.flow_found || 0}/${metrics.watch_count || 0}`;
+  $("#acConfirmed").textContent = metrics.confirmed || 0;
+  $("#acPortfolioFlowFound").textContent = `${metrics.portfolio_flow_found || 0}/${metrics.portfolio_count || 0}`;
+  $("#acDiverged").textContent = metrics.diverged || 0;
+  $("#acUpdated").textContent = running
+    ? "运行中"
+    : data.run_at
+      ? String(data.run_at).slice(5, 16).replace("T", " ")
+      : "待运行";
+  $("#afterCloseMethod").textContent = `${data.method_note || "资金流只作研究辅助。"}${data.fallback_used ? " 当前显示上一次可用缓存。" : ""}`;
+
+  $("#afterCloseConclusions").innerHTML = (data.conclusions || [])
+    .map((item) => `
+      <div class="suggestion-item ${escapeHtml(item.level || "info")}">
+        <strong>${escapeHtml(item.title)}</strong>
+        <p>${escapeHtml(item.detail)}</p>
+      </div>`)
+    .join("") || `<div class="empty">暂无盘后结论</div>`;
+
+  $("#afterCloseSources").innerHTML = (data.source_statuses || [])
+    .map((item) => `
+      <div class="source-status ${sourceStatusClass(item)}">
+        <div>
+          <strong>${escapeHtml(item.name)}</strong>
+          <p>${escapeHtml(item.detail || "")}${item.used_key ? ` · ${escapeHtml(item.used_key)}` : ""}</p>
+        </div>
+        <span>${sourceStatusLabel(item)} · ${item.count || 0}</span>
+      </div>`)
+    .join("") || `<div class="empty">尚未运行资金流任务</div>`;
+
+  $("#afterClosePortfolioRows").innerHTML = (data.portfolio_flows || [])
+    .map((item) => `
+      <tr>
+        <td><strong>${escapeHtml(item.name || item.symbol)}</strong><br><span class="muted">${escapeHtml(item.symbol || item.code || "")} · ${escapeHtml(statusLabel(item.data_status))}</span></td>
+        <td class="num">${fmtMoney(item.market_value)}</td>
+        <td class="num ${pnlClass(item.unrealized_pnl)}">${fmtMoney(item.unrealized_pnl)}<br><span>${item.unrealized_pct === null || item.unrealized_pct === undefined ? "-" : `${fmt(item.unrealized_pct)}%`}</span></td>
+        <td class="num">${fmt(item.allocation_pct)}%</td>
+        <td class="num ${pnlClass(item.change_pct)}">${fmt(item.change_pct)}%</td>
+        <td class="num ${flowClass(item.main_net_inflow)}">${fmtFlowMoney(item.main_net_inflow)}</td>
+        <td><span class="muted">${escapeHtml(item.flow_source || "未命中")}${item.rank ? ` #${item.rank}` : ""}</span></td>
+        <td><span class="action-chip ${signalClass(item.signal)}">${escapeHtml(item.signal || "-")}</span></td>
+        <td class="news-cell">${escapeHtml(item.signal_reason || "")}</td>
+      </tr>`)
+    .join("") || `<tr><td colspan="9" class="empty">暂无股票持仓盘后资金流。请先在“持仓”录入股票，或刷新盘后分析。</td></tr>`;
+
+  $("#afterCloseWatchRows").innerHTML = (data.watchlist_flows || [])
+    .map((item) => `
+      <tr>
+        <td><strong>${escapeHtml(item.name || item.symbol)}</strong><br><span class="muted">${escapeHtml(item.symbol || item.code || "")}</span></td>
+        <td>${escapeHtml(item.source === "portfolio" ? "持仓" : "候选池")}</td>
+        <td class="num">${fmt(item.total_score)}</td>
+        <td class="num">${fmt(item.heat_score, 0)}</td>
+        <td class="num ${pnlClass(item.change_pct)}">${fmt(item.change_pct)}%</td>
+        <td class="num ${flowClass(item.main_net_inflow)}">${fmtFlowMoney(item.main_net_inflow)}</td>
+        <td class="num ${flowClass(item.main_net_pct)}">${item.main_net_pct === null || item.main_net_pct === undefined || item.main_net_pct === "" ? "-" : `${fmt(item.main_net_pct)}%`}</td>
+        <td><span class="muted">${escapeHtml(item.flow_source || "未命中")}${item.rank ? ` #${item.rank}` : ""}</span></td>
+        <td><span class="action-chip ${signalClass(item.signal)}">${escapeHtml(item.signal || "-")}</span></td>
+        <td class="news-cell">${escapeHtml(item.signal_reason || "")}</td>
+      </tr>`)
+    .join("") || `<tr><td colspan="10" class="empty">暂无候选/持仓资金流交叉结果，点击刷新盘后分析。</td></tr>`;
+
+  renderFlowList("#sectorInflowList", data.sector_inflows || [], 8);
+  renderFlowList("#sectorOutflowList", data.sector_outflows || [], 8);
+  renderFlowList("#stockFlowRank", data.stock_flow_rank || [], 10);
+}
+
+async function triggerAfterClose() {
+  const notice = $("#afterCloseNotice");
+  notice.hidden = false;
+  notice.className = "notice";
+  notice.textContent = "盘后资金流分析刷新中";
+  await fetchJson("/api/after-close/update", { method: "POST" });
+  for (let i = 0; i < 100; i += 1) {
+    state.afterClose = await fetchJson("/api/after-close");
+    renderAfterClose();
+    if (!state.afterClose.state?.running) {
+      const failed = state.afterClose.metrics?.source_failures || 0;
+      notice.className = `notice ${state.afterClose.state?.returncode === 0 ? "good" : "bad"}`;
+      notice.textContent = state.afterClose.state?.returncode === 0
+        ? `盘后分析已刷新${failed ? `，${failed} 个来源失败，已保留可用数据` : ""}`
+        : `盘后分析失败: ${state.afterClose.state?.stderr || ""}`;
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+  }
+  notice.className = "notice bad";
+  notice.textContent = "盘后分析仍在运行，请稍后刷新页面查看。";
+}
+
 async function triggerFundAnalyst() {
   const notice = $("#fundAnalystNotice");
   notice.hidden = false;
@@ -923,6 +1076,23 @@ function maybeAutoUpdate() {
   });
 }
 
+function maybeAutoAfterClose() {
+  const data = state.afterClose || {};
+  if (data.state?.running) return;
+  const todayKey = new Date().toISOString().slice(0, 10);
+  if (data.trade_date === todayKey && data.run_at) return;
+  const key = `finance-dashboard-after-close-${todayKey}`;
+  if (localStorage.getItem(key)) return;
+  localStorage.setItem(key, "1");
+  triggerAfterClose().catch((error) => {
+    const notice = $("#afterCloseNotice");
+    if (!notice) return;
+    notice.hidden = false;
+    notice.className = "notice bad";
+    notice.textContent = `盘后分析自动刷新失败: ${error.message}`;
+  });
+}
+
 async function pollUpdate() {
   for (let i = 0; i < 80; i += 1) {
     const data = await fetchJson("/api/update-state");
@@ -955,6 +1125,12 @@ function bindEvents() {
     notice.hidden = false;
     notice.className = "notice bad";
     notice.textContent = `基金分析刷新失败: ${error.message}`;
+  }));
+  $("#runAfterClose").addEventListener("click", () => triggerAfterClose().catch((error) => {
+    const notice = $("#afterCloseNotice");
+    notice.hidden = false;
+    notice.className = "notice bad";
+    notice.textContent = `盘后分析刷新失败: ${error.message}`;
   }));
   $("#themeToggle").addEventListener("click", () => {
     const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";

@@ -32,6 +32,7 @@ DB_PATH = KB_DIR / "data" / "finance_kb.sqlite"
 UPDATE_SCRIPT = ROOT / "finance-knowledge-updater" / "scripts" / "update_knowledge_base.py"
 FUND_ANALYST_SCRIPT = ROOT / "finance-knowledge-updater" / "scripts" / "run_fund_analyst.py"
 FUND_ANALYST_DIR = KB_DIR / "fund_analyst"
+AFTER_CLOSE_DIR = KB_DIR / "after_close"
 HOLDINGS_PATH = KB_DIR / "input" / "portfolio_holdings.csv"
 TRADES_PATH = KB_DIR / "input" / "portfolio_trades.csv"
 SCREENSHOT_DIR = KB_DIR / "input" / "screenshots"
@@ -53,6 +54,16 @@ UPDATE_STATE: dict[str, Any] = {
 
 FUND_ANALYST_LOCK = threading.Lock()
 FUND_ANALYST_STATE: dict[str, Any] = {
+    "running": False,
+    "started_at": None,
+    "finished_at": None,
+    "returncode": None,
+    "stdout": "",
+    "stderr": "",
+}
+
+AFTER_CLOSE_LOCK = threading.Lock()
+AFTER_CLOSE_STATE: dict[str, Any] = {
     "running": False,
     "started_at": None,
     "finished_at": None,
@@ -141,6 +152,7 @@ SOURCE_CAPABILITIES: list[dict[str, str]] = [
     {"name": "东方财富 push2 实时行情", "category": "行情", "status": "已接入", "detail": "当前 eastmoney_stock provider 已用于 A股、指数、ETF 最新价、涨跌幅、成交额。"},
     {"name": "天天基金 fundgz 估算净值", "category": "行情", "status": "已接入", "detail": "当前 fundgz provider 已用于场外基金估算净值和估算涨跌幅。"},
     {"name": "AKShare stock_news_em", "category": "舆情", "status": "已接入", "detail": "当前本地 .venv 已安装 AKShare，并接入东方财富财经新闻封装；若依赖不可用会在来源状态里单独提示。"},
+    {"name": "AKShare 主力资金流", "category": "资金流", "status": "试验接入", "detail": "盘后分析会尝试获取个股、行业、概念资金流排名；接口不稳定时会保留上一次可用缓存，不参与候选池总分。"},
     {"name": "RSS/Atom/JSON 新闻源", "category": "舆情", "status": "已接入", "detail": "36Kr RSS、新浪财经 feed.mix JSON、东方财富快讯 JSON 和自定义 RSS/Atom 可进入新闻舆情解析。"},
     {"name": "东方财富 push2his 历史K线", "category": "历史行情", "status": "待适配", "detail": "入口可作为回测和持仓风控基础，但当前更新器尚未入库 K 线。"},
     {"name": "FRED 宏观 CSV", "category": "宏观", "status": "待适配", "detail": "可用于美债、通胀、美元等宏观序列；当前尚未参与评分。"},
@@ -316,6 +328,31 @@ def safe_float(value: Any, default: float | None = None) -> float | None:
         return float(text) * multiplier
     except ValueError:
         return default
+
+
+def parse_flow_money(value: Any, category: str = "", source: str = "", default: float | None = None) -> float | None:
+    amount = safe_float(value, default)
+    if amount is None:
+        return default
+    text = str(value or "").strip()
+    has_unit = bool(re.search(r"[万亿]", text))
+    source_l = source.lower()
+    is_alt_realtime = "alt" in source_l or "stock_fund_flow" in source_l
+    if not has_unit and is_alt_realtime:
+        if category in {"industry", "concept"}:
+            amount *= 100000000.0
+        elif category == "stock" and abs(amount) < 10000:
+            amount *= 100000000.0
+    return amount
+
+
+def akshare_market_for_code(code: str) -> str:
+    digits = re.sub(r"\D", "", str(code or ""))
+    if digits.startswith(("6", "5", "9")):
+        return "sh"
+    if digits.startswith(("4", "8")):
+        return "bj"
+    return "sz"
 
 
 def split_tags(value: Any) -> list[str]:
@@ -1445,6 +1482,666 @@ def fund_analyst_payload() -> dict[str, Any]:
     return payload
 
 
+def resolve_tool_python(config: dict[str, Any], key: str, default: str) -> Path:
+    configured = Path(str(config.get(key) or default)).expanduser()
+    if configured.is_absolute():
+        return configured
+    return ROOT / configured
+
+
+def pick_value(row: dict[str, Any], names: list[str], default: Any = None) -> Any:
+    for name in names:
+        if name in row and row.get(name) not in (None, ""):
+            return row.get(name)
+    lower_lookup = {str(key).lower(): key for key in row.keys()}
+    for name in names:
+        key = lower_lookup.get(name.lower())
+        if key is not None and row.get(key) not in (None, ""):
+            return row.get(key)
+    return default
+
+
+def normalize_flow_row(row: dict[str, Any], category: str, source: str) -> dict[str, Any]:
+    code = str(pick_value(row, ["代码", "股票代码", "证券代码", "_target_code", "code", "symbol"], "") or "").strip()
+    if category == "stock":
+        digits = re.sub(r"\D", "", code)
+        if 1 <= len(digits) < 6:
+            code = digits.zfill(6)
+    name = str(pick_value(row, ["名称", "股票简称", "板块名称", "行业名称", "概念名称", "行业", "板块", "_target_code", "name"], "") or "").strip()
+    latest = safe_float(pick_value(row, ["最新价", "收盘价", "当前价", "price", "最新"], None), None)
+    change_pct = safe_float(pick_value(row, ["涨跌幅", "今日涨跌幅", "最新涨跌幅", "行业-涨跌幅", "change_pct"], None), None)
+    main_raw = pick_value(
+        row,
+        [
+            "今日主力净流入-净额",
+            "主力净流入-净额",
+            "主力净流入",
+            "今日主力净流入",
+            "净额",
+            "净流入",
+            "main_net_inflow",
+        ],
+        None,
+    )
+    main_net = parse_flow_money(main_raw, category, source, None)
+    main_pct = safe_float(
+        pick_value(
+            row,
+            [
+                "今日主力净流入-净占比",
+                "主力净流入-净占比",
+                "主力净占比",
+                "净占比",
+                "主力净流入占比",
+                "main_net_pct",
+            ],
+            None,
+        ),
+        None,
+    )
+    super_raw = pick_value(
+        row,
+        [
+            "今日超大单净流入-净额",
+            "超大单净流入-净额",
+            "超大单净流入",
+            "超大单净额",
+            "super_net_inflow",
+        ],
+        None,
+    )
+    super_net = parse_flow_money(super_raw, category, source, None)
+    amount = parse_flow_money(pick_value(row, ["成交额", "金额", "amount"], None), category, source, None)
+    rank = safe_float(pick_value(row, ["序号", "排名", "rank"], None), None)
+    source_detail = str(row.get("_source_detail") or source)
+    return {
+        "code": code,
+        "symbol": normalize_symbol(code, "eastmoney_stock", "stock") if code else "",
+        "name": name or code,
+        "category": category,
+        "source": source_detail,
+        "money_unit": "yuan",
+        "rank": None if rank is None else int(rank),
+        "price": latest,
+        "change_pct": change_pct,
+        "main_net_inflow": main_net,
+        "main_net_pct": main_pct,
+        "super_net_inflow": super_net,
+        "amount": amount,
+    }
+
+
+def flow_sort_value(row: dict[str, Any]) -> float:
+    return abs(float(row.get("main_net_inflow") or row.get("super_net_inflow") or 0))
+
+
+def compact_flow_rows(rows: list[dict[str, Any]], category: str, source: str, limit: int = 80) -> list[dict[str, Any]]:
+    normalized = [normalize_flow_row(row, category, source) for row in rows]
+    normalized = [row for row in normalized if row.get("name") or row.get("code")]
+    normalized.sort(key=flow_sort_value, reverse=True)
+    return normalized[:limit]
+
+
+def merge_flow_rows(primary: list[dict[str, Any]], additions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in primary + additions:
+        keys = symbol_keys(row.get("code") or row.get("symbol"), "eastmoney_stock", "stock")
+        if keys and seen.intersection(keys):
+            continue
+        seen.update(keys)
+        merged.append(row)
+    return merged
+
+
+def run_akshare_flow_script(target_codes: list[str] | None = None, timeout: int = 55) -> tuple[dict[str, Any], str]:
+    config = read_json(CONFIG_PATH, {})
+    python_path = resolve_tool_python(config, "akshare_python", ".venv/bin/python")
+    if not python_path.exists():
+        raise FileNotFoundError(f"AKShare Python not found: {python_path}")
+    target_codes = [re.sub(r"\D", "", str(code or "")) for code in (target_codes or [])]
+    target_codes = [code for code in target_codes if len(code) == 6][:14]
+    code = r'''
+import json
+import sys
+import traceback
+import akshare as ak
+
+def frame_rows(fn, *args, limit=160, **kwargs):
+    try:
+        df = fn(*args, **kwargs)
+        if limit:
+            df = df.head(limit)
+        return {"ok": True, "columns": list(df.columns), "rows": df.astype(str).to_dict("records")}
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "trace": traceback.format_exc(limit=2)}
+
+def market_for_code(code):
+    return "sh" if str(code).startswith(("5", "6", "9")) else "bj" if str(code).startswith(("4", "8")) else "sz"
+
+def latest_individual_detail(code):
+    try:
+        df = ak.stock_individual_fund_flow(stock=code, market=market_for_code(code))
+        if df is None or df.empty:
+            return {"ok": False, "error": "empty dataframe", "rows": []}
+        row = df.tail(1).astype(str).to_dict("records")[0]
+        row["_target_code"] = code
+        row["_source_detail"] = "AKShare individual detail"
+        return {"ok": True, "columns": list(df.columns), "rows": [row]}
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "trace": traceback.format_exc(limit=2), "rows": []}
+
+targets = []
+try:
+    targets = json.loads(sys.argv[1]) if len(sys.argv) > 1 else []
+except Exception:
+    targets = []
+
+payload = {
+    "individual_rank": frame_rows(ak.stock_individual_fund_flow_rank, indicator="今日", limit=5500),
+    "main_rank": frame_rows(ak.stock_main_fund_flow, symbol="全部股票", limit=5500),
+    "sector_industry": frame_rows(ak.stock_sector_fund_flow_rank, indicator="今日", sector_type="行业资金流"),
+    "sector_concept": frame_rows(ak.stock_sector_fund_flow_rank, indicator="今日", sector_type="概念资金流"),
+}
+
+if not payload["individual_rank"]["ok"] and hasattr(ak, "stock_fund_flow_individual"):
+    payload["individual_rank_alt"] = frame_rows(ak.stock_fund_flow_individual, symbol="即时", limit=5500)
+if not payload["sector_industry"]["ok"] and hasattr(ak, "stock_fund_flow_industry"):
+    payload["sector_industry_alt"] = frame_rows(ak.stock_fund_flow_industry, symbol="即时")
+if not payload["sector_concept"]["ok"] and hasattr(ak, "stock_fund_flow_concept"):
+    payload["sector_concept_alt"] = frame_rows(ak.stock_fund_flow_concept, symbol="即时")
+
+detail_rows = []
+detail_errors = []
+rank_rows = []
+for key in ("individual_rank", "individual_rank_alt", "main_rank"):
+    item = payload.get(key) or {}
+    if item.get("ok"):
+        rank_rows.extend(item.get("rows") or [])
+rank_codes = set()
+for row in rank_rows:
+    raw = str(row.get("股票代码") or row.get("代码") or row.get("证券代码") or row.get("code") or row.get("symbol") or "")
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    if len(digits) >= 6:
+        rank_codes.add(digits[-6:])
+missing_targets = [str(target) for target in targets if str(target) not in rank_codes]
+if hasattr(ak, "stock_individual_fund_flow"):
+    for target in missing_targets[:8]:
+        result = latest_individual_detail(str(target))
+        if result.get("ok") and result.get("rows"):
+            detail_rows.extend(result.get("rows") or [])
+        else:
+            detail_errors.append({"code": target, "error": result.get("error")})
+payload["individual_detail"] = {
+    "ok": bool(detail_rows) or not missing_targets,
+    "skipped": not missing_targets,
+    "columns": ["_target_code", "_source_detail"],
+    "rows": detail_rows,
+    "errors": detail_errors[:20],
+}
+
+print(json.dumps(payload, ensure_ascii=False))
+'''
+    completed = subprocess.run(
+        [str(python_path), "-c", code, json.dumps(target_codes, ensure_ascii=False)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+    )
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout).strip()
+        raise RuntimeError(detail[:900] or f"AKShare exited with {completed.returncode}")
+    return json.loads(completed.stdout or "{}"), completed.stderr[-2000:]
+
+
+def short_exception_detail(exc: Exception) -> str:
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return f"TimeoutExpired: AKShare 资金流请求超过 {exc.timeout} 秒未返回"
+    return f"{type(exc).__name__}: {exc}"[:500]
+
+
+def select_flow_payload(payload: dict[str, Any], primary_key: str, alt_key: str | None = None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    primary = payload.get(primary_key) or {}
+    if primary.get("ok"):
+        return primary.get("rows") or [], {"name": primary_key, "ok": True, "count": len(primary.get("rows") or []), "detail": "AKShare fetched", "used_key": primary_key, "degraded": False}
+    if alt_key:
+        alt = payload.get(alt_key) or {}
+        if alt.get("ok"):
+            return alt.get("rows") or [], {"name": alt_key, "ok": True, "count": len(alt.get("rows") or []), "detail": f"primary failed, alt fetched: {primary.get('error') or ''}"[:500], "used_key": alt_key, "degraded": True}
+    return [], {"name": primary_key, "ok": False, "count": 0, "detail": str(primary.get("error") or "empty payload")[:500], "used_key": primary_key, "degraded": True}
+
+
+def flow_status_from_payload(payload: dict[str, Any], key: str, label: str | None = None) -> dict[str, Any]:
+    item = payload.get(key) or {}
+    rows = item.get("rows") or []
+    errors = item.get("errors") or []
+    if item.get("skipped"):
+        return {"name": label or key, "ok": True, "count": 0, "detail": "榜单已覆盖候选/持仓，未执行定向查询", "used_key": key, "degraded": False, "skipped": True}
+    if item.get("ok"):
+        detail = "AKShare fetched"
+        if errors:
+            detail = f"部分标的失败 {len(errors)} 个，已保留成功结果"
+        return {"name": label or key, "ok": True, "count": len(rows), "detail": detail, "used_key": key, "degraded": bool(errors)}
+    return {"name": label or key, "ok": False, "count": 0, "detail": str(item.get("error") or "empty payload")[:500], "used_key": key, "degraded": True}
+
+
+def candidate_flow_watchlist(candidates: list[dict[str, Any]], holdings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    result: list[dict[str, Any]] = []
+    for item in candidates:
+        if item.get("asset_type") != "stock":
+            continue
+        symbol = str(item.get("symbol") or "")
+        digits = re.sub(r"\D", "", symbol)
+        if len(digits) != 6 or digits in seen:
+            continue
+        seen.add(digits)
+        result.append({
+            "symbol": normalize_symbol(symbol, "eastmoney_stock", "stock"),
+            "code": digits,
+            "name": item.get("name") or symbol,
+            "total_score": item.get("total_score"),
+            "heat_score": item.get("heat_score"),
+            "change_pct": item.get("change_pct"),
+            "risk_penalty": item.get("risk_penalty"),
+            "action": item.get("action") or infer_candidate_action(item),
+            "source": "candidate",
+        })
+    for item in holdings:
+        if normalize_asset_type(item.get("asset_type")) != "stock":
+            continue
+        symbol = str(item.get("symbol") or "")
+        digits = re.sub(r"\D", "", symbol)
+        if len(digits) != 6 or digits in seen:
+            continue
+        seen.add(digits)
+        result.append({
+            "symbol": normalize_symbol(symbol, "eastmoney_stock", "stock"),
+            "code": digits,
+            "name": item.get("name") or symbol,
+            "total_score": item.get("research_score"),
+            "heat_score": None,
+            "change_pct": item.get("change_pct"),
+            "risk_penalty": item.get("risk_penalty"),
+            "action": "持仓复核",
+            "source": "portfolio",
+        })
+    result.sort(key=lambda row: (float(row.get("heat_score") or 0), float(row.get("total_score") or 0)), reverse=True)
+    return result[:24]
+
+
+def portfolio_flow_watchlist(holdings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in holdings:
+        if normalize_asset_type(item.get("asset_type")) != "stock":
+            continue
+        symbol = str(item.get("symbol") or "")
+        digits = re.sub(r"\D", "", symbol)
+        if len(digits) != 6 or digits in seen:
+            continue
+        seen.add(digits)
+        result.append({
+            "symbol": normalize_symbol(symbol, "eastmoney_stock", "stock"),
+            "code": digits,
+            "name": item.get("name") or symbol,
+            "total_score": item.get("research_score"),
+            "heat_score": None,
+            "change_pct": item.get("change_pct"),
+            "risk_penalty": item.get("risk_penalty"),
+            "action": "持仓复核",
+            "source": "portfolio",
+            "quantity": item.get("quantity"),
+            "cost_price": item.get("cost_price"),
+            "cost_value": item.get("cost_value"),
+            "current_price": item.get("current_price"),
+            "market_value": item.get("market_value"),
+            "unrealized_pnl": item.get("unrealized_pnl"),
+            "unrealized_pct": item.get("unrealized_pct"),
+            "allocation_pct": item.get("allocation_pct"),
+            "data_status": item.get("data_status"),
+            "news_hits_count": len(item.get("news_hits") or []),
+        })
+    result.sort(key=lambda row: float(row.get("market_value") or 0), reverse=True)
+    return result
+
+
+def build_watchlist_flows(watchlist: list[dict[str, Any]], flow_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    flow_lookup: dict[str, dict[str, Any]] = {}
+    for row in flow_rows:
+        for key in symbol_keys(row.get("code") or row.get("symbol"), "eastmoney_stock", "stock"):
+            flow_lookup[key] = row
+    result: list[dict[str, Any]] = []
+    for item in watchlist:
+        match = next((flow_lookup[key] for key in symbol_keys(item.get("code") or item.get("symbol"), "eastmoney_stock", "stock") if key in flow_lookup), None)
+        merged = {**item}
+        if match:
+            merged.update({
+                "flow_found": True,
+                "rank": match.get("rank"),
+                "price": match.get("price"),
+                "change_pct": match.get("change_pct") if match.get("change_pct") is not None else item.get("change_pct"),
+                "main_net_inflow": match.get("main_net_inflow"),
+                "main_net_pct": match.get("main_net_pct"),
+                "super_net_inflow": match.get("super_net_inflow"),
+                "amount": match.get("amount"),
+                "flow_source": match.get("source"),
+            })
+        else:
+            merged.update({
+                "flow_found": False,
+                "rank": None,
+                "main_net_inflow": None,
+                "main_net_pct": None,
+                "super_net_inflow": None,
+                "amount": None,
+                "flow_source": None,
+            })
+        result.append(merged)
+    return result
+
+
+def classify_flow_signal(item: dict[str, Any]) -> tuple[str, str, str]:
+    net = safe_float(item.get("main_net_inflow"), None)
+    pct = safe_float(item.get("main_net_pct"), None)
+    change = safe_float(item.get("change_pct"), None)
+    score = safe_float(item.get("total_score"), 0.0) or 0.0
+    heat = safe_float(item.get("heat_score"), 0.0) or 0.0
+    risk = safe_float(item.get("risk_penalty"), 0.0) or 0.0
+    if net is None:
+        return "缺资金数据", "neutral", "资金流接口未命中该标的，先只看行情和舆情。"
+    if net > 0 and (pct is None or pct >= 0) and (change is None or change >= 0):
+        return "资金确认", "good", "主力净流入与价格表现同向，可作为后续复核支撑。"
+    if score >= 55 and heat >= 45 and net < 0:
+        return "舆情资金背离", "warn", "候选热度/分数较高，但主力净流出，需要等待资金改善或复核原因。"
+    if risk >= 10 and net < 0:
+        return "风险复核", "risk", "风险扣分偏高且资金净流出，优先核验公告、基本面和止损条件。"
+    if net < 0 and change is not None and change < 0:
+        return "弱势流出", "risk", "价格下跌叠加资金净流出，短线不宜用资金面做正向确认。"
+    if net > 0 and change is not None and change < 0:
+        return "资金试探", "watch", "价格仍弱但有净流入，适合加入观察，等待价格结构确认。"
+    return "中性观察", "neutral", "资金流与行情未形成明确共振，继续观察。"
+
+
+def market_after_close_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    pulse = summary.get("market_pulse") or []
+    positives = [row for row in pulse if safe_float(row.get("change_pct"), 0.0) and safe_float(row.get("change_pct"), 0.0) > 0]
+    negatives = [row for row in pulse if safe_float(row.get("change_pct"), 0.0) and safe_float(row.get("change_pct"), 0.0) < 0]
+    hot = (summary.get("heat_keywords") or [])[:6]
+    risk_count = int((summary.get("metrics") or {}).get("risk_items") or 0)
+    return {
+        "pulse": pulse,
+        "positive_count": len(positives),
+        "negative_count": len(negatives),
+        "hot_keywords": hot,
+        "risk_items": risk_count,
+        "source_failures": int((summary.get("counts") or {}).get("source_failures") or 0),
+    }
+
+
+def after_close_conclusions(report: dict[str, Any]) -> list[dict[str, str]]:
+    watch = report.get("watchlist_flows") or []
+    portfolio_watch = report.get("portfolio_flows") or []
+    sector_in = report.get("sector_inflows") or []
+    sector_out = report.get("sector_outflows") or []
+    statuses = report.get("source_statuses") or []
+    failed = [item for item in statuses if not item.get("ok")]
+    degraded = [item for item in statuses if item.get("ok") and item.get("degraded")]
+    confirmed = [item for item in watch if item.get("signal") == "资金确认"]
+    diverged = [item for item in watch if item.get("signal") in {"舆情资金背离", "弱势流出", "风险复核"}]
+    portfolio_confirmed = [item for item in portfolio_watch if item.get("signal") == "资金确认"]
+    portfolio_risk = [item for item in portfolio_watch if item.get("signal") in {"舆情资金背离", "弱势流出", "风险复核"}]
+    conclusions: list[dict[str, str]] = []
+    if failed:
+        conclusions.append({"level": "warn", "title": "资金流接口部分失败", "detail": "部分主接口被断开或返回异常，已使用可用备用源与缓存；当前结果只作盘后复核线索。"})
+    elif degraded:
+        conclusions.append({"level": "info", "title": "已使用备用资金源", "detail": "主接口不稳定时已切到备用资金流表或定向查询，页面保留实际来源，便于复核口径。"})
+    if sector_in:
+        names = "、".join(str(item.get("name") or "") for item in sector_in[:3])
+        conclusions.append({"level": "info", "title": "盘后强势资金方向", "detail": f"行业/概念资金净流入靠前：{names}。可与热词雷达和候选池主题交叉验证。"})
+    if confirmed:
+        names = "、".join(str(item.get("name") or item.get("symbol") or "") for item in confirmed[:3])
+        conclusions.append({"level": "good", "title": "候选标的资金确认", "detail": f"{names} 出现资金净流入与价格同向，适合放入次日观察清单。"})
+    if diverged:
+        names = "、".join(str(item.get("name") or item.get("symbol") or "") for item in diverged[:3])
+        conclusions.append({"level": "warn", "title": "候选标的需复核", "detail": f"{names} 存在资金背离或弱势流出，先核验消息质量、公告和仓位风险。"})
+    if portfolio_confirmed:
+        names = "、".join(str(item.get("name") or item.get("symbol") or "") for item in portfolio_confirmed[:3])
+        conclusions.append({"level": "good", "title": "个人持仓资金确认", "detail": f"{names} 出现资金净流入或价格共振，可作为持仓复盘的正向证据。"})
+    if portfolio_risk:
+        names = "、".join(str(item.get("name") or item.get("symbol") or "") for item in portfolio_risk[:3])
+        conclusions.append({"level": "warn", "title": "个人持仓盘后复核", "detail": f"{names} 出现资金背离或弱势流出，建议结合成本、仓位和止损条件复盘。"})
+    if sector_out and not conclusions:
+        names = "、".join(str(item.get("name") or "") for item in sector_out[:3])
+        conclusions.append({"level": "info", "title": "资金流出方向", "detail": f"净流出靠前：{names}。若持仓重合，建议盘后复盘。"})
+    if not conclusions:
+        conclusions.append({"level": "info", "title": "暂无明确资金信号", "detail": "当前资金流、行情和舆情没有形成清晰共振，先保持观察。"})
+    return conclusions[:5]
+
+
+def latest_after_close_file() -> Path | None:
+    if not AFTER_CLOSE_DIR.exists():
+        return None
+    paths = sorted(AFTER_CLOSE_DIR.glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True)
+    return paths[0] if paths else None
+
+
+def latest_good_after_close_file(exclude: Path | None = None) -> Path | None:
+    if not AFTER_CLOSE_DIR.exists():
+        return None
+    for path in sorted(AFTER_CLOSE_DIR.glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True):
+        if exclude and path == exclude:
+            continue
+        payload = read_json(path, {})
+        if payload.get("ok") and payload.get("watchlist_flows"):
+            return path
+    return None
+
+
+def cleanup_after_close_history(keep: int = 7) -> list[str]:
+    if not AFTER_CLOSE_DIR.exists():
+        return []
+    paths = sorted(AFTER_CLOSE_DIR.glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True)
+    removed: list[str] = []
+    for path in paths[keep:]:
+        try:
+            path.unlink()
+            removed.append(str(path))
+        except FileNotFoundError:
+            pass
+    return removed
+
+
+def generate_after_close_report() -> tuple[dict[str, Any], str, str, int]:
+    run_at = now_iso()
+    trade_date = today_text()
+    summary = summary_payload()
+    candidates = read_candidates()
+    portfolio = analyze_portfolio()
+    portfolio_watchlist = portfolio_flow_watchlist(portfolio.get("holdings") or [])
+    watchlist = candidate_flow_watchlist(candidates, [])
+    flow_targets = merge_flow_rows(watchlist, portfolio_watchlist)
+    payload: dict[str, Any] = {}
+    stderr = ""
+    source_statuses: list[dict[str, Any]] = []
+    target_codes = [item.get("code") for item in flow_targets if item.get("code")]
+    try:
+        payload, stderr = run_akshare_flow_script(target_codes)
+    except Exception as exc:
+        source_statuses.append({"name": "akshare_fund_flow", "ok": False, "count": 0, "detail": short_exception_detail(exc)})
+
+    individual_raw, status = select_flow_payload(payload, "individual_rank", "individual_rank_alt") if payload else ([], {"name": "individual_rank", "ok": False, "count": 0, "detail": "AKShare task failed", "used_key": "individual_rank", "degraded": True})
+    source_statuses.append(status)
+    individual_source = str(status.get("used_key") or "individual_rank")
+    industry_raw, status = select_flow_payload(payload, "sector_industry", "sector_industry_alt") if payload else ([], {"name": "sector_industry", "ok": False, "count": 0, "detail": "AKShare task failed", "used_key": "sector_industry", "degraded": True})
+    source_statuses.append(status)
+    industry_source = str(status.get("used_key") or "sector_industry")
+    concept_raw, status = select_flow_payload(payload, "sector_concept", "sector_concept_alt") if payload else ([], {"name": "sector_concept", "ok": False, "count": 0, "detail": "AKShare task failed", "used_key": "sector_concept", "degraded": True})
+    source_statuses.append(status)
+    concept_source = str(status.get("used_key") or "sector_concept")
+    main_raw, status = select_flow_payload(payload, "main_rank") if payload else ([], {"name": "main_rank", "ok": False, "count": 0, "detail": "AKShare task failed", "used_key": "main_rank", "degraded": True})
+    source_statuses.append(status)
+    detail_raw = []
+    detail_source = "individual_detail"
+    detail_status: dict[str, Any] | None = None
+    if payload:
+        detail_status = flow_status_from_payload(payload, "individual_detail", "individual_detail_targets")
+        detail_raw = (payload.get("individual_detail") or {}).get("rows") or []
+
+    individual_flows_full = compact_flow_rows(individual_raw or main_raw, "stock", individual_source, limit=6000)
+    if not individual_flows_full and main_raw:
+        individual_flows_full = compact_flow_rows(main_raw, "stock", "main_rank", limit=6000)
+    detail_flows = compact_flow_rows(detail_raw, "stock", detail_source, limit=60)
+    individual_flows = merge_flow_rows(individual_flows_full, detail_flows)
+    industry_flows = compact_flow_rows(industry_raw, "industry", industry_source)
+    concept_flows = compact_flow_rows(concept_raw, "concept", concept_source)
+    sector_flows = industry_flows + concept_flows
+    sector_flows.sort(key=flow_sort_value, reverse=True)
+
+    watchlist_flows = build_watchlist_flows(watchlist, individual_flows)
+    portfolio_flows = build_watchlist_flows(portfolio_watchlist, individual_flows)
+    for item in watchlist_flows + portfolio_flows:
+        signal, tone, reason = classify_flow_signal(item)
+        item["signal"] = signal
+        item["signal_tone"] = tone
+        item["signal_reason"] = reason
+    missing_flow_count = len([item for item in watchlist_flows + portfolio_flows if not item.get("flow_found")])
+    if detail_status:
+        if detail_flows or missing_flow_count:
+            source_statuses.append(detail_status)
+        else:
+            source_statuses.append({
+                "name": "individual_detail_targets",
+                "ok": True,
+                "count": 0,
+                "detail": "榜单已覆盖候选/持仓，未执行定向查询",
+                "used_key": "individual_detail",
+                "degraded": False,
+                "skipped": True,
+            })
+
+    sector_inflows = [row for row in sector_flows if safe_float(row.get("main_net_inflow"), 0.0) and safe_float(row.get("main_net_inflow"), 0.0) > 0]
+    sector_outflows = [row for row in sector_flows if safe_float(row.get("main_net_inflow"), 0.0) and safe_float(row.get("main_net_inflow"), 0.0) < 0]
+    sector_inflows.sort(key=lambda row: float(row.get("main_net_inflow") or 0), reverse=True)
+    sector_outflows.sort(key=lambda row: float(row.get("main_net_inflow") or 0))
+
+    ok = bool([item for item in source_statuses if item.get("ok")]) and bool(individual_flows or sector_flows)
+    report = {
+        "ok": ok,
+        "run_at": run_at,
+        "trade_date": trade_date,
+        "stale": False,
+        "fallback_used": False,
+        "method_note": "资金流为试验性盘后复核因子，只用于确认/背离提示，不改变候选池总分，不构成投资建议。",
+        "source_statuses": source_statuses,
+        "market_summary": market_after_close_summary(summary),
+        "watchlist_flows": watchlist_flows,
+        "portfolio_flows": portfolio_flows,
+        "sector_inflows": sector_inflows[:12],
+        "sector_outflows": sector_outflows[:12],
+        "stock_flow_rank": individual_flows[:20],
+        "source_columns": {key: (value.get("columns") if isinstance(value, dict) else []) for key, value in payload.items()},
+    }
+    report["metrics"] = {
+        "watch_count": len(watchlist_flows),
+        "flow_found": len([item for item in watchlist_flows if item.get("flow_found")]),
+        "confirmed": len([item for item in watchlist_flows if item.get("signal") == "资金确认"]),
+        "diverged": len([item for item in watchlist_flows if item.get("signal") in {"舆情资金背离", "弱势流出", "风险复核"}]),
+        "portfolio_count": len(portfolio_flows),
+        "portfolio_flow_found": len([item for item in portfolio_flows if item.get("flow_found")]),
+        "portfolio_confirmed": len([item for item in portfolio_flows if item.get("signal") == "资金确认"]),
+        "portfolio_diverged": len([item for item in portfolio_flows if item.get("signal") in {"舆情资金背离", "弱势流出", "风险复核"}]),
+        "sector_inflows": len(report["sector_inflows"]),
+        "source_failures": len([item for item in source_statuses if not item.get("ok") and not item.get("skipped")]),
+        "source_degraded": len([item for item in source_statuses if item.get("ok") and item.get("degraded")]),
+        "target_detail_hits": len(detail_flows),
+    }
+    report["conclusions"] = after_close_conclusions(report)
+
+    path = AFTER_CLOSE_DIR / f"{trade_date}.json"
+    write_json(path, report)
+    cleanup_after_close_history()
+    return report, json.dumps({"path": str(path), "ok": ok, "degraded": not ok}, ensure_ascii=False), stderr, 0
+
+
+def after_close_payload() -> dict[str, Any]:
+    latest = latest_after_close_file()
+    payload = read_json(latest, {}) if latest else {}
+    if not payload:
+        payload = {
+            "ok": False,
+            "run_at": None,
+            "trade_date": None,
+            "stale": False,
+            "fallback_used": False,
+            "method_note": "尚未运行盘后分析。",
+            "source_statuses": [],
+            "market_summary": {},
+            "watchlist_flows": [],
+            "portfolio_flows": [],
+            "sector_inflows": [],
+            "sector_outflows": [],
+            "stock_flow_rank": [],
+            "metrics": {"watch_count": 0, "flow_found": 0, "confirmed": 0, "diverged": 0, "portfolio_count": 0, "portfolio_flow_found": 0, "portfolio_confirmed": 0, "portfolio_diverged": 0, "sector_inflows": 0, "source_failures": 0},
+            "conclusions": [{"level": "info", "title": "尚未生成盘后分析", "detail": "点击刷新后会尝试拉取主力资金、板块资金和候选池交叉信号。"}],
+        }
+    payload["state"] = dict(AFTER_CLOSE_STATE)
+    payload["path"] = str(latest) if latest else str(AFTER_CLOSE_DIR / f"{today_text()}.json")
+    return payload
+
+
+def run_after_close_task() -> None:
+    global AFTER_CLOSE_STATE
+    with AFTER_CLOSE_LOCK:
+        AFTER_CLOSE_STATE = {
+            "running": True,
+            "started_at": dt.datetime.now().isoformat(timespec="seconds"),
+            "finished_at": None,
+            "returncode": None,
+            "stdout": "",
+            "stderr": "",
+        }
+    try:
+        report, stdout, stderr, returncode = generate_after_close_report()
+        if not report.get("ok"):
+            current_path = AFTER_CLOSE_DIR / f"{today_text()}.json"
+            fallback_path = latest_good_after_close_file(exclude=current_path)
+            if fallback_path:
+                fallback = read_json(fallback_path, {})
+                fallback["stale"] = True
+                fallback["fallback_used"] = True
+                fallback["fallback_from"] = str(fallback_path)
+                fallback["failed_run_at"] = report.get("run_at")
+                fallback["source_statuses"] = report.get("source_statuses") or fallback.get("source_statuses") or []
+                fallback["conclusions"] = after_close_conclusions(fallback)
+                write_json(current_path, fallback)
+                stdout = json.dumps({"path": str(current_path), "fallback_from": str(fallback_path)}, ensure_ascii=False)
+                returncode = 0
+    except Exception as exc:
+        stdout = ""
+        stderr = f"{type(exc).__name__}: {exc}"
+        returncode = 1
+    with AFTER_CLOSE_LOCK:
+        AFTER_CLOSE_STATE.update({
+            "running": False,
+            "finished_at": dt.datetime.now().isoformat(timespec="seconds"),
+            "returncode": returncode,
+            "stdout": stdout[-6000:],
+            "stderr": stderr[-6000:],
+        })
+
+
+def start_after_close() -> dict[str, Any]:
+    with AFTER_CLOSE_LOCK:
+        if AFTER_CLOSE_STATE.get("running"):
+            return {"started": False, "state": dict(AFTER_CLOSE_STATE)}
+        AFTER_CLOSE_STATE["running"] = True
+    thread = threading.Thread(target=run_after_close_task, daemon=True)
+    thread.start()
+    return {"started": True, "state": dict(AFTER_CLOSE_STATE)}
+
+
 def mutate_config(action: str, payload: dict[str, Any]) -> dict[str, Any]:
     config = read_json(CONFIG_PATH, {})
     config.setdefault("news_sources", [])
@@ -1680,6 +2377,9 @@ class Handler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/fund-analyst":
             self.send_json(fund_analyst_payload())
             return
+        if parsed.path == "/api/after-close":
+            self.send_json(after_close_payload())
+            return
         if parsed.path == "/":
             self.path = "/index.html"
         super().do_GET()
@@ -1696,6 +2396,9 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if parsed.path == "/api/fund-analyst/update":
             self.send_json(start_fund_analyst(), HTTPStatus.ACCEPTED)
+            return
+        if parsed.path == "/api/after-close/update":
+            self.send_json(start_after_close(), HTTPStatus.ACCEPTED)
             return
         if parsed.path.startswith("/api/config/"):
             action = parsed.path.rsplit("/", 1)[-1].replace("-", "_")

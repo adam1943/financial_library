@@ -20,6 +20,7 @@ knowledge_base/data/
 knowledge_base/raw/
 knowledge_base/reports/
 knowledge_base/fund_analyst/
+knowledge_base/after_close/
 knowledge_base/latest.md
 knowledge_base/latest_attempt.md
 knowledge_base/candidates.csv

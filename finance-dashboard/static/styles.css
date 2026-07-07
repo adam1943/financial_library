@@ -268,6 +268,10 @@ button:disabled {
   font-size: 24px;
 }
 
+#afterClose .metric-grid {
+  grid-template-columns: repeat(5, minmax(130px, 1fr));
+}
+
 .metric span {
   display: block;
   color: var(--muted);
@@ -612,6 +616,14 @@ button:disabled {
   color: var(--good);
 }
 
+.source-status.warn > span {
+  color: var(--warn);
+}
+
+.source-status.skipped > span {
+  color: var(--muted);
+}
+
 .quality-row.bad strong,
 .source-status.fail > span {
   color: var(--risk);
@@ -777,6 +789,11 @@ button:disabled {
 .action-chip.watch {
   background: color-mix(in srgb, var(--accent-2) 12%, var(--surface));
   color: var(--accent-2);
+}
+
+.action-chip.warn {
+  background: color-mix(in srgb, var(--warn) 15%, var(--surface));
+  color: var(--warn);
 }
 
 .action-chip.risk {
@@ -1228,6 +1245,14 @@ select {
   min-width: 1180px;
 }
 
+.after-close-table {
+  min-width: 1120px;
+}
+
+.portfolio-after-close-table {
+  min-width: 1180px;
+}
+
 .portfolio-form {
   grid-template-columns: repeat(4, minmax(130px, 1fr)) auto;
   align-items: end;
@@ -1262,9 +1287,59 @@ select {
 
 .suggestion-list,
 .fund-risk-list,
-.style-panel {
+.style-panel,
+.flow-list {
   display: grid;
   gap: 10px;
+}
+
+.after-close-grid {
+  align-items: start;
+}
+
+.flow-columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.flow-columns h4 {
+  margin: 0 0 10px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.flow-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.flow-item:last-child {
+  border-bottom: 0;
+}
+
+.flow-item strong,
+.flow-item span {
+  display: block;
+}
+
+.flow-item span {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.flow-item b {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.compact-flow .flow-item {
+  padding: 8px 0;
 }
 
 .suggestion-item {
@@ -1395,7 +1470,8 @@ select {
 
   .overview-body,
   .overview-side-stack,
-  .overview-news .news-list.compact {
+  .overview-news .news-list.compact,
+  .flow-columns {
     grid-template-columns: 1fr;
   }
 
